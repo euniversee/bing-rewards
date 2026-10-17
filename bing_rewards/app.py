@@ -193,6 +193,9 @@ def search(count: int, words_gen: Iterator[str], agent: str, options: Namespace)
     key_mod, key = (Key.ctrl, 'e') if options.bing else (Key.alt, 'd')
 
     for i in range(count):
+        if getattr(options, 'skip_profile', False):
+            break
+
         # Get a random query from set of words
         query = next(words_gen)
 
@@ -215,9 +218,12 @@ def search(count: int, words_gen: Iterator[str], agent: str, options: Namespace)
             # Type the url into the address bar
             # with a 30ms delay between keystrokes
             for char in search_url + '\n':
+                if getattr(options, 'skip_profile', False):
+                    break
                 key_controller.tap(char)
                 time.sleep(0.03)
-            key_controller.tap(Key.enter)
+            if not getattr(options, 'skip_profile', False):
+                key_controller.tap(Key.enter)
 
         print(f'Search {i + 1}: {query}')
 
@@ -231,11 +237,20 @@ def search(count: int, words_gen: Iterator[str], agent: str, options: Namespace)
                 # catastrophic failure
                 raise ValueError(f'Invalid configuration format: "search_delay": {other!r}')
 
-        time.sleep(delay)
+        for _ in range(int(delay * 10)):
+            if getattr(options, 'skip_profile', False):
+                break
+            time.sleep(0.1)
 
     # Skip killing the window if exit flag set
     if options.no_exit:
         return
+
+    # Workaround for Edge/Chrome process detachment:
+    # Send Alt+F4 to close the active window safely
+    with key_controller.pressed(Key.alt):
+        key_controller.tap(Key.f4)
+    time.sleep(1)
 
     close_browser(chrome)
 
@@ -248,6 +263,103 @@ def main():
     Setup listener callback for ESC key.
     """
     options = app_options.get_options()
+    
+    if getattr(options, 'list_profiles', False):
+        import json
+        from pathlib import Path
+        user_data_path = Path(os.environ['LOCALAPPDATA']) / 'Microsoft' / 'Edge' / 'User Data'
+        local_state_path = user_data_path / 'Local State'
+        if not local_state_path.exists():
+            print("File data Edge (Local State) tidak ditemukan.")
+            return
+        
+        with open(local_state_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        print("\n=== DAFTAR PROFIL EDGE ANDA ===")
+        print(f"{'Direktori':<15} | {'Nama Profil':<20} | {'Email':<45} | {'Ukuran (MB)'}")
+        print("-" * 100)
+        info_cache = data.get('profile', {}).get('info_cache', {})
+        for directory, info in info_cache.items():
+            name = info.get('name', 'Unknown')
+            email = info.get('user_name', '')
+            
+            # Hitung ukuran folder secara rekursif
+            profile_dir = user_data_path / directory
+            size_mb = 0.0
+            if profile_dir.exists():
+                try:
+                    for f in profile_dir.rglob('*'):
+                        try:
+                            if f.is_file():
+                                size_mb += f.stat().st_size
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+            size_mb = size_mb / (1024 * 1024)
+            
+            print(f"{directory:<15} | {name:<20} | {email:<45} | {size_mb:>10.2f} MB")
+        print("-" * 100)
+        print("Gunakan nama di kolom 'Direktori' (misal 'Profile 1') di parameter --profile")
+        return
+
+    if getattr(options, 'clean_profiles', False):
+        import json
+        import shutil
+        from pathlib import Path
+        user_data_path = Path(os.environ['LOCALAPPDATA']) / 'Microsoft' / 'Edge' / 'User Data'
+        local_state_path = user_data_path / 'Local State'
+        if not local_state_path.exists():
+            print("File data Edge (Local State) tidak ditemukan.")
+            return
+        
+        with open(local_state_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        info_cache = data.get('profile', {}).get('info_cache', {})
+        print("\n=== MEMULAI PEMBERSIHAN CACHE PROFIL EDGE ===")
+        cleaned_count = 0
+        total_saved_bytes = 0
+        
+        for directory, info in info_cache.items():
+            if directory == 'Default':
+                continue
+            
+            profile_dir = user_data_path / directory
+            if not profile_dir.exists():
+                continue
+            
+            print(f"Membersihkan cache {directory} ({info.get('name', 'Unknown')})...")
+            cache_subdirs = [
+                "Cache",
+                "Code Cache",
+                "GPUCache",
+                "Service Worker/CacheStorage",
+                "Service Worker/ScriptCache"
+            ]
+            for subdir in cache_subdirs:
+                target_dir = profile_dir / subdir
+                if target_dir.exists():
+                    try:
+                        for f in target_dir.rglob('*'):
+                            if f.is_file():
+                                total_saved_bytes += f.stat().st_size
+                    except Exception:
+                        pass
+                    try:
+                        shutil.rmtree(target_dir)
+                    except Exception:
+                        pass
+            cleaned_count += 1
+            
+        saved_mb = total_saved_bytes / (1024 * 1024)
+        print("-" * 60)
+        print(f"Pembersihan selesai! Berhasil membersihkan {cleaned_count} profil.")
+        print(f"Total ruang penyimpanan yang dihemat: {saved_mb:.2f} MB")
+        return
+
+
     words_gen = word_generator()
 
     def desktop(profile=''):
@@ -285,21 +397,32 @@ def main():
 
     # Run for each specified profile (defaults to ['Default'])
     for profile in options.profile:
+        options.skip_profile = False
         # Start the searching in separate thread
         search_thread = threading.Thread(target=target_func, args=(profile,), daemon=True)
         search_thread.start()
 
-        print('Press ESC to quit searching')
+        print('Press ESC to quit searching entirely, or F9 to skip the current profile')
 
         try:
             # Listen for keyboard events and exit if ESC pressed
             while search_thread.is_alive():
                 with keyboard.Events() as events:
                     event = events.get(timeout=0.5)  # block for 0.5 seconds
+
+                    if not event or not hasattr(event, 'key'):
+                        continue
+
                     # Exit if ESC key pressed
-                    if event and event.key == Key.esc:
+                    if event.key == Key.esc:
                         print('ESC pressed, terminating')
+                        options.skip_profile = True
                         return  # Exit the entire function if ESC is pressed
+
+                    if event.key == Key.f9:
+                        print('F9 pressed, skipping current profile')
+                        options.skip_profile = True
+                        break
 
         except KeyboardInterrupt:
             print('CTRL-C pressed, terminating')

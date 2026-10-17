@@ -174,6 +174,16 @@ def parse_args() -> Namespace:
         default=None,
     )
     p.add_argument(
+        '--list-profiles',
+        help='List all available Edge profiles and their emails',
+        action='store_true',
+    )
+    p.add_argument(
+        '--clean-profiles',
+        help='Clear temporary cache files for all profiles except Default',
+        action='store_true',
+    )
+    p.add_argument(
         '--profile',
         help='Sets one or more chrome profiles to run sequentially (space separated)',
         type=str,
